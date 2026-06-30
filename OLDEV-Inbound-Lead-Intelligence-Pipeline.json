@@ -1,0 +1,415 @@
+{
+  "name": "OLDEV-Inbound-Lead-Intelligence-Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "oldev-lead-intel",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "33333333-0001-4001-8001-000000000001",
+      "name": "Inbound Lead Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [-220, 0],
+      "webhookId": "oldev-lead-intel"
+    },
+    {
+      "parameters": {
+        "mode": "manual",
+        "includeOtherFields": false,
+        "assignments": {
+          "assignments": [
+            { "id": "a1", "name": "email", "value": "={{ ($json.body?.email ?? $json.email ?? '').toString().trim().toLowerCase() }}", "type": "string" },
+            { "id": "a2", "name": "name", "value": "={{ $json.body?.name ?? $json.name ?? '' }}", "type": "string" },
+            { "id": "a3", "name": "source", "value": "={{ $json.body?.source ?? $json.source ?? 'unknown' }}", "type": "string" },
+            { "id": "a4", "name": "domain", "value": "={{ (($json.body?.email ?? $json.email ?? '').toString().split('@')[1] || '').toLowerCase() }}", "type": "string" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "33333333-0002-4001-8001-000000000002",
+      "name": "Normalize Payload",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            { "id": "c1", "leftValue": "={{ $json.email }}", "rightValue": "^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$", "operator": { "type": "string", "operation": "regex" } }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "33333333-0003-4001-8001-000000000003",
+      "name": "Valid Email?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [200, 0]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://dns.google/resolve?name={{ $json.domain }}&type=TXT",
+        "options": { "timeout": 8000 }
+      },
+      "id": "33333333-0004-4001-8001-000000000004",
+      "name": "DNS: SPF (TXT)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, -200],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://dns.google/resolve?name=_dmarc.{{ $json.domain }}&type=TXT",
+        "options": { "timeout": 8000 }
+      },
+      "id": "33333333-0005-4001-8001-000000000005",
+      "name": "DNS: DMARC (TXT)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, -40],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://dns.google/resolve?name={{ $json.domain }}&type=MX",
+        "options": { "timeout": 8000 }
+      },
+      "id": "33333333-0006-4001-8001-000000000006",
+      "name": "DNS: MX",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 120],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://rdap.org/domain/{{ $json.domain }}",
+        "options": { "timeout": 8000 }
+      },
+      "id": "33333333-0007-4001-8001-000000000007",
+      "name": "RDAP: Domain Info",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 280],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "=https://disify.com/api/email/{{ $json.email }}",
+        "options": { "timeout": 8000 }
+      },
+      "id": "33333333-0008-4001-8001-000000000008",
+      "name": "Disposable Check",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [440, 440],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "numberInputs": 5
+      },
+      "id": "33333333-0009-4001-8001-000000000009",
+      "name": "Merge Signals",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [700, 120]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Pull each upstream node's output explicitly (Merge interleaves; reference by node).\nconst base = $('Normalize Payload').first().json;\nconst spfRes = $('DNS: SPF (TXT)').first().json || {};\nconst dmarcRes = $('DNS: DMARC (TXT)').first().json || {};\nconst mxRes = $('DNS: MX').first().json || {};\nconst rdap = $('RDAP: Domain Info').first().json || {};\nconst disp = $('Disposable Check').first().json || {};\n\nfunction txtAnswers(res) {\n  const ans = (res && res.Answer) ? res.Answer : [];\n  return ans.map(function (a) { return String(a.data || '').replace(/\\\"/g, ''); });\n}\nconst spfRecords = txtAnswers(spfRes).filter(function (t) { return /^v=spf1/i.test(t); });\nconst dmarcRecords = txtAnswers(dmarcRes).filter(function (t) { return /^v=DMARC1/i.test(t); });\nconst mxCount = (mxRes && mxRes.Answer) ? mxRes.Answer.length : 0;\n\nconst hasSpf = spfRecords.length > 0;\nconst hasDmarc = dmarcRecords.length > 0;\nconst hasMx = mxCount > 0;\nlet dmarcPolicy = null;\nif (hasDmarc) {\n  const m = dmarcRecords[0].match(/p=([a-z]+)/i);\n  dmarcPolicy = m ? m[1].toLowerCase() : null;\n}\n\n// Domain age from RDAP registration event\nlet registeredAt = null, ageDays = null;\nif (rdap && Array.isArray(rdap.events)) {\n  const reg = rdap.events.find(function (e) { return e.eventAction === 'registration'; });\n  if (reg && reg.eventDate) {\n    registeredAt = reg.eventDate;\n    ageDays = Math.round(($now.toMillis() - new Date(reg.eventDate).getTime()) / 86400000);\n  }\n}\n\nconst isDisposable = !!(disp && (disp.disposable === true || disp.disposable === 'true'));\nconst formatValid = !!(disp && (disp.format === true || disp.format === 'true'));\n\n// Deliverability score (0-100)\nlet delivScore = 100;\nconst delivFindings = [];\nif (!hasSpf) { delivScore -= 30; delivFindings.push('no_spf'); }\nif (!hasDmarc) { delivScore -= 30; delivFindings.push('no_dmarc'); }\nelse if (dmarcPolicy === 'none') { delivScore -= 10; delivFindings.push('dmarc_p_none'); }\nif (!hasMx) { delivScore -= 25; delivFindings.push('no_mx'); }\nif (isDisposable) { delivScore -= 40; delivFindings.push('disposable_domain'); }\nif (delivScore < 0) delivScore = 0;\n\n// Lead score (0-100): favor established, well-configured, non-disposable domains\nlet leadScore = 50;\nif (hasMx) leadScore += 10;\nif (hasSpf && hasDmarc) leadScore += 15;\nif (ageDays !== null && ageDays > 365) leadScore += 15;\nif (ageDays !== null && ageDays < 30) leadScore -= 20;\nif (isDisposable) leadScore -= 50;\nif (leadScore < 0) leadScore = 0; if (leadScore > 100) leadScore = 100;\n\nlet tier = 'reject';\nif (!isDisposable && leadScore >= 70) tier = 'hot';\nelse if (!isDisposable && leadScore >= 45) tier = 'warm';\n\nreturn [{ json: {\n  email: base.email, name: base.name, source: base.source, domain: base.domain,\n  hasSpf: hasSpf, hasDmarc: hasDmarc, dmarcPolicy: dmarcPolicy, hasMx: hasMx, mxCount: mxCount,\n  registeredAt: registeredAt, ageDays: ageDays,\n  isDisposable: isDisposable, formatValid: formatValid,\n  deliverabilityScore: delivScore, deliverabilityFindings: delivFindings,\n  leadScore: leadScore, tier: tier,\n  evaluatedAt: $now.toISO()\n} }];"
+      },
+      "id": "33333333-0010-4001-8001-000000000010",
+      "name": "Score & Classify",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [920, 120]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+                "conditions": [ { "leftValue": "={{ $json.tier }}", "rightValue": "hot", "operator": { "type": "string", "operation": "equals" } } ],
+                "combinator": "and"
+              },
+              "renameOutput": true, "outputKey": "hot"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+                "conditions": [ { "leftValue": "={{ $json.tier }}", "rightValue": "warm", "operator": { "type": "string", "operation": "equals" } } ],
+                "combinator": "and"
+              },
+              "renameOutput": true, "outputKey": "warm"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+                "conditions": [ { "leftValue": "={{ $json.tier }}", "rightValue": "reject", "operator": { "type": "string", "operation": "equals" } } ],
+                "combinator": "and"
+              },
+              "renameOutput": true, "outputKey": "reject"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "33333333-0011-4001-8001-000000000011",
+      "name": "Route by Tier",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [1160, 120]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://wp.oldev.site/wp-json/fluent-crm/v2/subscribers",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ email: $json.email, full_name: $json.name, tags: ['hot-lead'], status: 'subscribed', source: $json.source }) }}",
+        "options": { "timeout": 10000 }
+      },
+      "id": "33333333-0012-4001-8001-000000000012",
+      "name": "Create Hot Lead in CRM",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1400, -120],
+      "onError": "continueErrorOutput"
+    },
+    {
+      "parameters": {
+        "fromEmail": "alerts@oldev.site",
+        "toEmail": "sales@oldev.site",
+        "subject": "=HOT lead ({{ $json.leadScore }}/100): {{ $json.email }}",
+        "html": "=<h2>Hot lead</h2><p><b>{{ $json.name }}</b> &lt;{{ $json.email }}&gt; from <i>{{ $json.source }}</i></p><ul><li>Lead score: {{ $json.leadScore }}/100</li><li>Deliverability: {{ $json.deliverabilityScore }}/100</li><li>Domain age: {{ $json.ageDays }} days</li><li>SPF {{ $json.hasSpf }} / DMARC {{ $json.dmarcPolicy }} / MX {{ $json.mxCount }}</li></ul>",
+        "options": {}
+      },
+      "id": "33333333-0013-4001-8001-000000000013",
+      "name": "Email: Hot Lead Alert",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1640, -200]
+    },
+    {
+      "parameters": {
+        "mode": "manual",
+        "includeOtherFields": true,
+        "assignments": {
+          "assignments": [ { "id": "w1", "name": "queue", "value": "nurture", "type": "string" } ]
+        },
+        "options": {}
+      },
+      "id": "33333333-0014-4001-8001-000000000014",
+      "name": "Tag Warm -> Nurture",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1400, 120]
+    },
+    {
+      "parameters": {
+        "fromEmail": "alerts@oldev.site",
+        "toEmail": "sales@oldev.site",
+        "subject": "=Warm lead queued: {{ $json.email }}",
+        "html": "=<h2>Warm lead -> nurture</h2><p>{{ $json.email }} (score {{ $json.leadScore }}/100) added to the nurture queue.</p>",
+        "options": {}
+      },
+      "id": "33333333-0015-4001-8001-000000000015",
+      "name": "Email: Warm Queued",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1640, 120]
+    },
+    {
+      "parameters": {},
+      "id": "33333333-0016-4001-8001-000000000016",
+      "name": "Reject -> Log Only",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1400, 320]
+    },
+    {
+      "parameters": {
+        "mode": "manual",
+        "includeOtherFields": true,
+        "assignments": {
+          "assignments": [ { "id": "e1", "name": "error", "value": "invalid_email_format", "type": "string" } ]
+        },
+        "options": {}
+      },
+      "id": "33333333-0017-4001-8001-000000000017",
+      "name": "Mark Invalid",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [440, 600]
+    },
+    {
+      "parameters": {
+        "fromEmail": "alerts@oldev.site",
+        "toEmail": "ops@oldev.site",
+        "subject": "=Lead pipeline: rejected invalid payload",
+        "html": "=<p>An inbound lead was rejected: <code>{{ $json.email }}</code> failed email validation.</p>",
+        "options": {}
+      },
+      "id": "33333333-0018-4001-8001-000000000018",
+      "name": "Email: Invalid Notice",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [700, 600]
+    },
+    {
+      "parameters": {
+        "mode": "manual",
+        "includeOtherFields": true,
+        "assignments": {
+          "assignments": [ { "id": "f1", "name": "crmError", "value": "={{ $json.error?.message ?? 'CRM call failed' }}", "type": "string" } ]
+        },
+        "options": {}
+      },
+      "id": "33333333-0019-4001-8001-000000000019",
+      "name": "Capture CRM Error",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [1640, -20]
+    },
+    {
+      "parameters": {
+        "fromEmail": "alerts@oldev.site",
+        "toEmail": "ops@oldev.site",
+        "subject": "=Lead pipeline: CRM write failed for {{ $json.email }}",
+        "html": "=<p>Hot lead {{ $json.email }} scored {{ $json.leadScore }} but the CRM create failed: {{ $json.crmError }}. Manual follow-up needed.</p>",
+        "options": {}
+      },
+      "id": "33333333-0020-4001-8001-000000000020",
+      "name": "Email: CRM Failure Alert",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1860, -20]
+    },
+    {
+      "parameters": {},
+      "id": "33333333-0021-4001-8001-000000000021",
+      "name": "On Error",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [-220, 600]
+    },
+    {
+      "parameters": {
+        "fromEmail": "alerts@oldev.site",
+        "toEmail": "ops@oldev.site",
+        "subject": "=Lead pipeline ERROR: {{ $json.workflow?.name }}",
+        "html": "=<h2>Workflow error</h2><p>Node: {{ $json.execution?.lastNodeExecuted }}</p><pre>{{ $json.execution?.error?.message }}</pre>",
+        "options": {}
+      },
+      "id": "33333333-0022-4001-8001-000000000022",
+      "name": "Email: Pipeline Error",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [0, 600]
+    },
+    {
+      "parameters": {
+        "content": "## OLDEV: Inbound Lead Intelligence Pipeline\nWebhook -> validate -> live DNS (SPF/DMARC/MX via Google DoH) + RDAP domain age + disposable check -> score & classify -> route hot/warm/reject -> CRM write + tiered email alerts. Real public APIs (no keys). Email Send + CRM nodes need your credentials selected after import. Error Trigger + CRM error branch included.",
+        "height": 240,
+        "width": 560,
+        "color": 4
+      },
+      "id": "33333333-0023-4001-8001-000000000023",
+      "name": "Sticky Title",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [-220, -300]
+    },
+    {
+      "parameters": {
+        "content": "### Live enrichment (no auth)\n- dns.google/resolve: SPF, DMARC, MX\n- rdap.org: domain registration / age\n- disify.com: disposable + format check\nAll set to continue-on-error so one slow lookup never kills the run.",
+        "height": 200,
+        "width": 320,
+        "color": 6
+      },
+      "id": "33333333-0024-4001-8001-000000000024",
+      "name": "Sticky APIs",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [440, -440]
+    }
+  ],
+  "connections": {
+    "Inbound Lead Webhook": {
+      "main": [[{ "node": "Normalize Payload", "type": "main", "index": 0 }]]
+    },
+    "Normalize Payload": {
+      "main": [[{ "node": "Valid Email?", "type": "main", "index": 0 }]]
+    },
+    "Valid Email?": {
+      "main": [
+        [
+          { "node": "DNS: SPF (TXT)", "type": "main", "index": 0 },
+          { "node": "DNS: DMARC (TXT)", "type": "main", "index": 0 },
+          { "node": "DNS: MX", "type": "main", "index": 0 },
+          { "node": "RDAP: Domain Info", "type": "main", "index": 0 },
+          { "node": "Disposable Check", "type": "main", "index": 0 }
+        ],
+        [
+          { "node": "Mark Invalid", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "DNS: SPF (TXT)": { "main": [[{ "node": "Merge Signals", "type": "main", "index": 0 }]] },
+    "DNS: DMARC (TXT)": { "main": [[{ "node": "Merge Signals", "type": "main", "index": 1 }]] },
+    "DNS: MX": { "main": [[{ "node": "Merge Signals", "type": "main", "index": 2 }]] },
+    "RDAP: Domain Info": { "main": [[{ "node": "Merge Signals", "type": "main", "index": 3 }]] },
+    "Disposable Check": { "main": [[{ "node": "Merge Signals", "type": "main", "index": 4 }]] },
+    "Merge Signals": {
+      "main": [[{ "node": "Score & Classify", "type": "main", "index": 0 }]]
+    },
+    "Score & Classify": {
+      "main": [[{ "node": "Route by Tier", "type": "main", "index": 0 }]]
+    },
+    "Route by Tier": {
+      "main": [
+        [{ "node": "Create Hot Lead in CRM", "type": "main", "index": 0 }],
+        [{ "node": "Tag Warm -> Nurture", "type": "main", "index": 0 }],
+        [{ "node": "Reject -> Log Only", "type": "main", "index": 0 }]
+      ]
+    },
+    "Create Hot Lead in CRM": {
+      "main": [
+        [{ "node": "Email: Hot Lead Alert", "type": "main", "index": 0 }],
+        [{ "node": "Capture CRM Error", "type": "main", "index": 0 }]
+      ]
+    },
+    "Capture CRM Error": {
+      "main": [[{ "node": "Email: CRM Failure Alert", "type": "main", "index": 0 }]]
+    },
+    "Tag Warm -> Nurture": {
+      "main": [[{ "node": "Email: Warm Queued", "type": "main", "index": 0 }]]
+    },
+    "Mark Invalid": {
+      "main": [[{ "node": "Email: Invalid Notice", "type": "main", "index": 0 }]]
+    },
+    "On Error": {
+      "main": [[{ "node": "Email: Pipeline Error", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "pinData": {},
+  "meta": {}
+}

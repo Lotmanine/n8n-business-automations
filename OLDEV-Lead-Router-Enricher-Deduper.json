@@ -1,0 +1,241 @@
+{
+  "name": "OLDEV-Lead-Router-Enricher-Deduper",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "11111111-0001-4001-8001-000000000001",
+      "name": "Run Demo",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Synthetic inbound leads (no real data). Includes duplicates,\n// an invalid email, and role-based addresses on purpose.\nconst leads = [\n  { email: 'Ava.Stone@Acme.io', phone: '+1 (415) 555-0100', name: 'Ava Stone', source: 'contact-form' },\n  { email: 'ava.stone@acme.io', phone: '415-555-0100', name: 'Ava S.', source: 'contact-form' },\n  { email: 'info@globex.com', phone: '+44 20 7946 0958', name: 'Globex Team', source: 'newsletter' },\n  { email: 'not-an-email', phone: '', name: 'Broken Lead', source: 'contact-form' },\n  { email: 'liam@initech.dev', phone: '(212) 555 0142', name: 'Liam Park', source: 'demo-request' },\n  { email: 'noreply@hooli.io', phone: '', name: 'Hooli Bot', source: 'contact-form' }\n];\nreturn leads.map(function (json) { return { json: json }; });"
+      },
+      "id": "11111111-0002-4001-8001-000000000002",
+      "name": "Generate Sample Leads",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const ROLE_PREFIXES = ['info','admin','sales','support','abuse','postmaster','noreply','no-reply','contact','hello','office'];\nconst out = [];\nfor (const item of $input.all()) {\n  const raw = item.json;\n  const email = String(raw.email || '').trim().toLowerCase();\n  const localPart = email.split('@')[0] || '';\n  const domain = email.split('@')[1] || '';\n  const emailValid = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email);\n  const isRoleBased = ROLE_PREFIXES.indexOf(localPart) !== -1;\n  const phoneDigits = String(raw.phone || '').replace(/[^0-9]/g, '');\n  const phoneE164ish = phoneDigits ? ('+' + phoneDigits) : '';\n  const reasons = [];\n  if (!emailValid) reasons.push('invalid_email_syntax');\n  if (isRoleBased) reasons.push('role_based_address');\n  out.push({ json: Object.assign({}, raw, {\n    email: email, domain: domain, phone: phoneE164ish,\n    emailValid: emailValid, isRoleBased: isRoleBased,\n    accepted: emailValid && !isRoleBased, rejectReasons: reasons\n  }) });\n}\nreturn out;"
+      },
+      "id": "11111111-0003-4001-8001-000000000003",
+      "name": "Validate & Normalize",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+                "conditions": [
+                  { "leftValue": "={{ $json.accepted }}", "rightValue": "", "operator": { "type": "boolean", "operation": "true", "singleValue": true } }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "accepted"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+                "conditions": [
+                  { "leftValue": "={{ $json.accepted }}", "rightValue": "", "operator": { "type": "boolean", "operation": "false", "singleValue": true } }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "rejected"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "11111111-0004-4001-8001-000000000004",
+      "name": "Accepted?",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [660, 0]
+    },
+    {
+      "parameters": {},
+      "id": "11111111-0005-4001-8001-000000000005",
+      "name": "Quarantine + Log (invalid / role-based)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [880, 160]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const FREE = ['gmail.com','yahoo.com','outlook.com','hotmail.com','icloud.com','aol.com','proton.me'];\nconst out = [];\nfor (const item of $input.all()) {\n  const j = item.json;\n  const domain = j.domain || '';\n  const isFreeMail = FREE.indexOf(domain) !== -1;\n  const root = domain.split('.').slice(-2, -1)[0] || domain;\n  const companyGuess = isFreeMail ? null : (root ? root.charAt(0).toUpperCase() + root.slice(1) : null);\n  out.push({ json: Object.assign({}, j, { isFreeMail: isFreeMail, companyGuess: companyGuess }) });\n}\nreturn out;"
+      },
+      "id": "11111111-0006-4001-8001-000000000006",
+      "name": "Enrich (company + free-mail)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [880, -40]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Synthetic 'already in CRM' set. In production this is a CRM lookup node.\nconst EXISTING = ['liam@initech.dev'];\nconst seenThisRun = [];\nconst out = [];\nfor (const item of $input.all()) {\n  const j = item.json;\n  const email = j.email;\n  const dupInBatch = seenThisRun.indexOf(email) !== -1;\n  seenThisRun.push(email);\n  const existsInCrm = EXISTING.indexOf(email) !== -1;\n  const status = (dupInBatch || existsInCrm) ? 'returning' : 'new';\n  out.push({ json: Object.assign({}, j, { dupInBatch: dupInBatch, existsInCrm: existsInCrm, contactStatus: status }) });\n}\nreturn out;"
+      },
+      "id": "11111111-0007-4001-8001-000000000007",
+      "name": "Dedupe vs CRM",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1100, -40]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+                "conditions": [
+                  { "leftValue": "={{ $json.contactStatus }}", "rightValue": "new", "operator": { "type": "string", "operation": "equals" } }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "new"
+            },
+            {
+              "conditions": {
+                "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+                "conditions": [
+                  { "leftValue": "={{ $json.contactStatus }}", "rightValue": "returning", "operator": { "type": "string", "operation": "equals" } }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "returning"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "11111111-0008-4001-8001-000000000008",
+      "name": "New or Returning?",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.4,
+      "position": [1320, -40]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "const OWNERS = ['alex@oldev.site', 'sam@oldev.site', 'jordan@oldev.site'];\nconst out = [];\nlet i = 0;\nfor (const item of $input.all()) {\n  const owner = OWNERS[i % OWNERS.length];\n  i++;\n  out.push({ json: Object.assign({}, item.json, { assignedOwner: owner }) });\n}\nreturn out;"
+      },
+      "id": "11111111-0009-4001-8001-000000000009",
+      "name": "Round-Robin Assign",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1540, -120]
+    },
+    {
+      "parameters": {},
+      "id": "11111111-0010-4001-8001-000000000010",
+      "name": "Create Contact in CRM",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1760, -200]
+    },
+    {
+      "parameters": {},
+      "id": "11111111-0011-4001-8001-000000000011",
+      "name": "Notify Owner (Slack / Email)",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1760, -40]
+    },
+    {
+      "parameters": {},
+      "id": "11111111-0012-4001-8001-000000000012",
+      "name": "Update Contact + Route to Existing Owner",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [1540, 60]
+    },
+    {
+      "parameters": {
+        "content": "## OLDEV: Inbound Lead Router, Enricher & Deduper\nValidate, enrich, dedupe, branch (new / returning), round-robin assign, notify. Fully synthetic sample data; CRM / Slack integration points are stubbed as NoOp so it runs with zero credentials.",
+        "height": 200,
+        "width": 460,
+        "color": 4
+      },
+      "id": "11111111-0013-4001-8001-000000000013",
+      "name": "Sticky Title",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [0, -260]
+    },
+    {
+      "parameters": {
+        "content": "### Validate & route\nInvalid syntax and role-based addresses (info@, noreply@) are quarantined before they reach the CRM. Protects sender reputation and keeps the list clean.",
+        "height": 180,
+        "width": 320,
+        "color": 3
+      },
+      "id": "11111111-0014-4001-8001-000000000014",
+      "name": "Sticky Hygiene",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [660, 280]
+    }
+  ],
+  "connections": {
+    "Run Demo": {
+      "main": [[{ "node": "Generate Sample Leads", "type": "main", "index": 0 }]]
+    },
+    "Generate Sample Leads": {
+      "main": [[{ "node": "Validate & Normalize", "type": "main", "index": 0 }]]
+    },
+    "Validate & Normalize": {
+      "main": [[{ "node": "Accepted?", "type": "main", "index": 0 }]]
+    },
+    "Accepted?": {
+      "main": [
+        [{ "node": "Enrich (company + free-mail)", "type": "main", "index": 0 }],
+        [{ "node": "Quarantine + Log (invalid / role-based)", "type": "main", "index": 0 }]
+      ]
+    },
+    "Enrich (company + free-mail)": {
+      "main": [[{ "node": "Dedupe vs CRM", "type": "main", "index": 0 }]]
+    },
+    "Dedupe vs CRM": {
+      "main": [[{ "node": "New or Returning?", "type": "main", "index": 0 }]]
+    },
+    "New or Returning?": {
+      "main": [
+        [{ "node": "Round-Robin Assign", "type": "main", "index": 0 }],
+        [{ "node": "Update Contact + Route to Existing Owner", "type": "main", "index": 0 }]
+      ]
+    },
+    "Round-Robin Assign": {
+      "main": [[
+        { "node": "Create Contact in CRM", "type": "main", "index": 0 },
+        { "node": "Notify Owner (Slack / Email)", "type": "main", "index": 0 }
+      ]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "pinData": {},
+  "meta": {}
+}

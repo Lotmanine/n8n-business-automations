@@ -1,0 +1,15 @@
+# OS / editor
+.DS_Store
+Thumbs.db
+*.swp
+.vscode/
+.idea/
+
+# n8n local
+.n8n/
+*.log
+
+# secrets (never commit credentials or tokens)
+.env
+*.token
+credentials*.json
