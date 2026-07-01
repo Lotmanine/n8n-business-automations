@@ -250,7 +250,7 @@
       "position": [1640, 300]
     },
     {
-      "parameters": { "numberInputs": 5 },
+      "parameters": { "mode": "append", "numberInputs": 5, "options": {} },
       "id": "44444444-0019-4001-8001-000000000019",
       "name": "Merge Assigned",
       "type": "n8n-nodes-base.merge",

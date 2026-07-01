@@ -119,7 +119,10 @@
     },
     {
       "parameters": {
-        "numberInputs": 5
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "numberInputs": 5,
+        "options": {}
       },
       "id": "33333333-0009-4001-8001-000000000009",
       "name": "Merge Signals",
